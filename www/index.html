@@ -377,103 +377,180 @@ ${e2.stack}`),console.error(e2)}perchanceErrorIndicator&&!document.querySelector
     });
 
 </script>
-<!-- AppMint: avisos del sistema para los mensajes de la malla wifi -->
+<!-- AppMint: avisos del sistema reutilizables (malla wifi, SMS, calendario, lo que agregues) -->
 <script>
 (function () {
-  var MESH_USER_TAG = 'mesh-';
+  window.AppMint = window.AppMint || {};
+  var reg = {};      // clave -> { nombre, pantalla, alTocar }
+  var titulos = {};  // titulo -> clave (sirve para saber que pantalla abrir al tocar el aviso)
 
-  // 1) Service worker del chat (solo tiene sentido en http/https; dentro del APK
-  //    el origen es file:// y Android no permite registrar service workers).
-  try {
-    if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
-      navigator.serviceWorker.register('sw.js')
-        .then(function (reg) { console.log('Service Worker listo para el chat:', reg); })
-        .catch(function (err) { console.warn('No se pudo registrar el Service Worker:', err && err.message); });
+  function activado(clave) { try { return localStorage.getItem('nt_' + clave) === '1'; } catch (e) { return false; } }
+  function preguntado(clave) { try { return localStorage.getItem('ntAsked_' + clave) === '1'; } catch (e) { return false; } }
+  function permiso() {
+    try {
+      if ('Notification' in window) return Notification.permission;
+      if (window.MintApp && MintApp.hasPermission) return MintApp.hasPermission('POST_NOTIFICATIONS') ? 'granted' : 'default';
+    } catch (e) {}
+    return 'denied';
+  }
+  function registrar(clave, cfg) {
+    cfg = cfg || {};
+    reg[clave] = { nombre: cfg.nombre || clave, pantalla: cfg.pantalla || null, alTocar: cfg.alTocar || null };
+    return reg[clave];
+  }
+  function pedirPermiso(clave, cb) {
+    if (activado(clave) || preguntado(clave)) { if (cb) cb(activado(clave)); return; }
+    if (typeof window.ntReq === 'function') {           // reutiliza el modal de avisos de la app
+      window.ntReq(clave, cb);
+      var lbl = document.getElementById('ntPermTitle');
+      if (lbl && reg[clave]) lbl.textContent = reg[clave].nombre;
+      return;
     }
-  } catch (e) {}
-
-  // 2) Pedir el permiso de notificaciones (nativo en el APK, del navegador en web)
-  window.solicitarPermisoNotificaciones = function () {
+    if (window.MintApp && MintApp.requestNotificationPermission) {
+      MintApp.requestNotificationPermission();
+      try { localStorage.setItem('nt_' + clave, '1'); } catch (e) {}
+      if (cb) cb(true);
+      return;
+    }
+    if ('Notification' in window && Notification.requestPermission) {
+      Notification.requestPermission().then(function (p) {
+        try { if (p === 'granted') localStorage.setItem('nt_' + clave, '1'); } catch (e) {}
+        if (cb) cb(p === 'granted');
+      });
+      return;
+    }
+    if (cb) cb(false);
+  }
+  function enPantalla(clave) {
     try {
-      if (window.MintApp && MintApp.requestNotificationPermission) { MintApp.requestNotificationPermission(); return; }
-      if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
-    } catch (e) {}
-  };
-  var pedirPermiso = function () { setTimeout(window.solicitarPermisoNotificaciones, 1500); };
-  if (document.readyState === 'complete') pedirPermiso();
-  else window.addEventListener('load', pedirPermiso);
-
-  // 3) Abrir la pantalla de la malla wifi (al tocar una notificacion)
-  window.abrirMallaWifi = function () {
+      if (document.visibilityState !== 'visible') return false;
+      var cfg = reg[clave];
+      var el = cfg && cfg.pantalla ? document.getElementById(cfg.pantalla) : null;
+      return !!(el && !el.hidden);
+    } catch (e) { return false; }
+  }
+  function publicar(clave, titulo, texto, opts) {
+    opts = opts || {};
+    titulo = String(titulo == null || titulo === '' ? (reg[clave] ? reg[clave].nombre : 'Aviso') : titulo);
+    texto = String(texto == null ? '' : texto).slice(0, 160);
+    var tag = opts.tag || (clave + '-' + titulo);
     try {
-      var mesh = document.getElementById('meshView');
-      var menu = document.getElementById('menu');
-      if (mesh) { mesh.hidden = false; if (menu) menu.hidden = true; }
-      var inp = document.getElementById('meshMsgInput');
-      if (inp && inp.focus) setTimeout(function () { try { inp.focus(); } catch (e) {} }, 150);
-    } catch (e) {}
-  };
-
-  // 4) Mostrar el aviso del sistema de un mensaje nuevo
-  window.mostrarNotificacionMensaje = function (usuario, textoMensaje) {
-    usuario = String(usuario == null || usuario === '' ? 'Alguien' : usuario);
-    textoMensaje = String(textoMensaje == null ? '' : textoMensaje).slice(0, 160);
-    var titulo = 'Nuevo mensaje de ' + usuario;
-    var tag = MESH_USER_TAG + usuario;
-    try {
-      if (window.MintApp && MintApp.notify) { MintApp.notify(titulo, textoMensaje, tag); return true; }
+      if (window.MintApp && MintApp.notify) { MintApp.notify(titulo, texto, tag); return true; }
       if ('Notification' in window && Notification.permission === 'granted') {
-        var n = new Notification(titulo, { body: textoMensaje, tag: tag, vibrate: [200, 100, 200], renotify: true });
-        n.onclick = function () { window.abrirMallaWifi(); };
+        var n = new Notification(titulo, { body: texto, tag: tag, vibrate: [200, 100, 200], renotify: true });
+        n.onclick = function () { abrir(clave); };
         return true;
       }
       if (navigator.serviceWorker && navigator.serviceWorker.ready) {
-        navigator.serviceWorker.ready.then(function (reg) {
-          reg.showNotification(titulo, {
-            body: textoMensaje, tag: tag, vibrate: [200, 100, 200], renotify: true,
-            actions: [{ action: 'abrir', title: 'Responder' }, { action: 'cerrar', title: 'Descartar' }]
+        navigator.serviceWorker.ready.then(function (r) {
+          r.showNotification(titulo, {
+            body: texto, tag: tag, vibrate: [200, 100, 200], renotify: true,
+            actions: [{ action: 'abrir', title: 'Abrir' }, { action: 'cerrar', title: 'Descartar' }]
           });
         });
         return true;
       }
     } catch (e) {}
     return false;
+  }
+  function enviar(clave, titulo, texto, opts) {
+    opts = opts || {};
+    if (opts.siempre !== true && enPantalla(clave)) return false;
+    if (permiso() === 'granted') return publicar(clave, titulo, texto, opts);
+    pedirPermiso(clave, function (ok) { if (ok) publicar(clave, titulo, texto, opts); });
+    return true;
+  }
+  function abrir(clave) {
+    var cfg = reg[clave];
+    try {
+      if (cfg && typeof cfg.alTocar === 'function') cfg.alTocar();
+      else if (cfg && cfg.pantalla) {
+        var el = document.getElementById(cfg.pantalla);
+        var menu = document.getElementById('menu');
+        if (el) { el.hidden = false; if (menu) menu.hidden = true; }
+      }
+    } catch (e) {}
+    try { window.dispatchEvent(new CustomEvent('appmint-aviso', { detail: { clave: clave } })); } catch (e) {}
+  }
+  function claveDeTag(tag) {
+    tag = String(tag || '');
+    for (var k in reg) { if (Object.prototype.hasOwnProperty.call(reg, k) && tag.indexOf(k + '-') === 0) return k; }
+    if (tag.indexOf('mint-') === 0) return titulos[tag.slice(5)] || null;
+    return null;
+  }
+
+  window.AppMint.avisos = {
+    registrar: registrar,
+    enviar: enviar,
+    abrir: abrir,
+    activado: activado,
+    permiso: permiso,
+    pedirPermiso: pedirPermiso,
+    registro: reg
   };
 
-  // 5) Toques sobre la notificacion (APK y service worker)
+  // Caracteristicas de la app. Para una nueva: registrar('clave', {nombre, pantalla}).
+  registrar('cal', { nombre: 'Calendario', pantalla: 'calView' });
+  registrar('mesh', { nombre: 'Malla WiFi', pantalla: 'meshView' });
+  registrar('soc', { nombre: 'Relaciones', pantalla: 'socView' });
+  registrar('sms', { nombre: 'Mensajes SMS', pantalla: 'smsView' });
+
+  // 1) Service worker (solo en http/https: dentro del APK el origen es file://)
+  try {
+    if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+      navigator.serviceWorker.register('sw.js')
+        .then(function (r) { console.log('Service Worker listo:', r); })
+        .catch(function (e) { console.warn('No se pudo registrar el Service Worker:', e && e.message); });
+    }
+  } catch (e) {}
+
+  // 2) Permiso del sistema al abrir la app (Android 13+)
+  window.solicitarPermisoNotificaciones = function () {
+    try {
+      if (window.MintApp && MintApp.requestNotificationPermission) { MintApp.requestNotificationPermission(); return; }
+      if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
+    } catch (e) {}
+  };
+  var pedir = function () { setTimeout(window.solicitarPermisoNotificaciones, 1500); };
+  if (document.readyState === 'complete') pedir(); else window.addEventListener('load', pedir);
+
+  // 3) Al tocar la notificacion se abre la pantalla de esa caracteristica
   window.addEventListener('mint-notification-click', function (ev) {
-    var tag = (ev && ev.detail && ev.detail.tag) || '';
-    if (tag.indexOf(MESH_USER_TAG) === 0) window.abrirMallaWifi();
+    var clave = claveDeTag((ev && ev.detail && ev.detail.tag) || '');
+    if (clave) abrir(clave);
   });
   try {
     if ('serviceWorker' in navigator && navigator.serviceWorker.addEventListener) {
       navigator.serviceWorker.addEventListener('message', function (ev) {
         var d = ev && ev.data;
-        if (d && d.type === 'notification-click' && d.action !== 'cerrar') window.abrirMallaWifi();
+        if (!d || d.type !== 'notification-click' || d.action === 'cerrar') return;
+        abrir(claveDeTag(d.tag) || 'mesh');
       });
     }
   } catch (e) {}
 
-  // 6) Enganchar la malla wifi: cada mensaje recibido avisa al sistema.
-  var debeAvisar = function () {
-    try {
-      if (document.visibilityState !== 'visible') return true;
-      var mesh = document.getElementById('meshView');
-      return !(mesh && !mesh.hidden);
-    } catch (e) { return true; }
+  // 4) Nombres antiguos (compatibles con el codigo que ya tenias)
+  window.mostrarNotificacionMensaje = function (usuario, texto) {
+    return enviar('mesh', 'Nuevo mensaje de ' + (usuario == null || usuario === '' ? 'Alguien' : usuario), texto);
   };
+  window.abrirMallaWifi = function () { abrir('mesh'); };
+
+  // 5) Engancha TODOS los avisos internos de la app (ntSend) al sistema:
+  //    si la app no avisa (aviso interno apagado o sin permiso), avisa el sistema.
   var enganchar = function () {
-    if (window.__mintMeshHook || typeof window.ntSend !== 'function') return false;
-    window.__mintMeshHook = true;
+    if (window.__mintAvisosHook || typeof window.ntSend !== 'function') return false;
+    window.__mintAvisosHook = true;
     var previo = window.ntSend;
     window.ntSend = function (f, title, body) {
+      if (!f) { try { previo.apply(this, arguments); } catch (e) {} return; }
+      titulos[String(title)] = f;
+      var propio = activado(f) && permiso() === 'granted';
+      var callar = propio && enPantalla(f);   // ya estas viendo esa pantalla: no hace falta el aviso del sistema
+      var real = window.Notification;
+      if (callar) { try { window.Notification = function () {}; } catch (e) {} }
       try { previo.apply(this, arguments); } catch (e) {}
-      if (f !== 'mesh') return;
-      var yaAvisa = false;
-      try {
-        yaAvisa = localStorage.getItem('nt_mesh') === '1' && 'Notification' in window && Notification.permission === 'granted';
-      } catch (e) {}
-      if (!yaAvisa && debeAvisar()) window.mostrarNotificacionMensaje(title, body);
+      if (callar) { try { window.Notification = real; } catch (e) {} }
+      if (!propio) enviar(f, title, body);
     };
     return true;
   };
