@@ -1,0 +1,97 @@
+name: Build Android APK
+
+on:
+  push:
+    paths-ignore:
+      - '.appmint/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+
+      - name: Install Android SDK components
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools" >/dev/null 2>&1 || true
+          echo "ANDROID_HOME=$ANDROID_HOME"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Montar el proyecto Android desde appmint.json
+        run: |
+          curl -fsSL "https://user.uploads.dev/file/c10d4f78b97321dab8a9911ceaeaf912.zip" -o tpl.zip
+          unzip -q tpl.zip -d _tpl
+          python3 _tpl/build.py .
+          rm -rf tpl.zip _tpl
+
+      - name: Debug - estructura y archivos generados
+        run: |
+          find . -type f -not -path './.git/*' | sort
+          echo '===== settings.gradle ====='
+          cat settings.gradle 2>/dev/null || echo '(sin settings.gradle)'
+          echo '===== app/build.gradle ====='
+          cat app/build.gradle 2>/dev/null || echo '(sin app/build.gradle)'
+          echo '===== gradle.properties ====='
+          cat gradle.properties 2>/dev/null || echo '(sin gradle.properties)'
+
+      - name: Build APK and AAB
+        run: |
+          mkdir -p .appmint
+          set +e
+          gradle --no-daemon --stacktrace assembleRelease bundleRelease 2>&1 | tee .appmint/build-log.txt
+          exit ${PIPESTATUS[0]}
+
+      - name: Guardar log del fallo en el repositorio
+        if: failure()
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add .appmint/build-log.txt 2>/dev/null || true
+          git commit -m "appmint: log del fallo" --allow-empty || true
+          git push || true
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: APK-Instalable
+          path: app/build/outputs/apk/release/*.apk
+
+      - name: Upload AAB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AAB-GooglePlay
+          path: app/build/outputs/bundle/release/*.aab
+
+      - name: Create Release with APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: APK AppMint v1.0.${{ github.run_number }}
+          body: |
+            APK generado automaticamente con AppMint Studio.
+            Descarga e instala el archivo .apk en tu telefono
+            (permite instalar aplicaciones de origenes desconocidos).
+          files: app/build/outputs/apk/release/*.apk
+          fail_on_unmatched_files: false
